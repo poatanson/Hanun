@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Paragraph};
 use crate::app::App;
 use crate::model::PanelId;
 
+mod chart;
 mod cpu;
 mod disk;
 mod help;
@@ -73,7 +74,7 @@ fn draw_top_bar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
-    let [top, bottom, process] = Layout::vertical([
+    let [top, bottom, process_row] = Layout::vertical([
         Constraint::Length(5),
         Constraint::Length(5),
         Constraint::Min(0),
@@ -84,6 +85,9 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
     let [disk_area, network_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bottom);
+    let [process, chart_area] =
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .areas(process_row);
 
     let cpu_inner = render_panel(
         frame,
@@ -126,6 +130,14 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         app.focused_panel == PanelId::Process,
         app.ascii_mode,
     );
+    let chart_title = format!("[6] CHART: {}", app.chart_kind.label());
+    let chart_inner = render_panel(
+        frame,
+        chart_area,
+        &chart_title,
+        app.focused_panel == PanelId::Chart,
+        app.ascii_mode,
+    );
 
     let offset = |panel: PanelId| {
         if app.focused_panel == panel {
@@ -163,6 +175,15 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         app.process_order.indices(),
         offset(PanelId::Process),
     );
+    chart::draw(
+        frame,
+        chart_inner,
+        snapshot.map(|s| &s.mem),
+        snapshot.map(|s| s.disks.as_slice()),
+        snapshot.map(|s| &s.cpu),
+        app.chart_kind,
+        app.ascii_mode,
+    );
 }
 
 /// Renders a bordered, titled panel and returns its interior area for the panel's own draw
@@ -190,12 +211,12 @@ fn render_panel(
 
 fn draw_hint(frame: &mut Frame, area: Rect, ascii_mode: bool) {
     let (up, down) = if ascii_mode {
-        ("Up", "Down")
+        ("U", "D")
     } else {
         ("\u{2191}", "\u{2193}")
     };
     let hint = format!(
-        "q Quit  Tab/1-5 Focus  {up}{down}/jk Scroll  s Sort  / Filter  p Pause  +/- Interval  ? Help"
+        "q Quit Tab/1-6 Focus {up}{down}jk Scroll s Sort / Filter p Pause +/- Rate g Chart ? Help"
     );
     frame.render_widget(Paragraph::new(hint), area);
 }
@@ -252,6 +273,7 @@ mod tests {
         assert!(text.contains("DISK"));
         assert!(text.contains("NETWORK"));
         assert!(text.contains("PROCESS"));
+        assert!(text.contains("CHART"));
         assert!(!text.contains("Terminal too small"));
     }
 

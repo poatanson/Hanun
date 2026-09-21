@@ -4,7 +4,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::event::AppEvent;
-use crate::model::{PanelId, ProcessOrder, Snapshot, SortMode};
+use crate::model::{ChartKind, PanelId, ProcessOrder, Snapshot, SortMode};
 use crate::sampler::{MAX_INTERVAL, MIN_INTERVAL, SamplerCommand};
 
 const INTERVAL_STEP_MS: u64 = 250;
@@ -23,6 +23,7 @@ pub struct App {
     pub scroll_offset: usize,
     pub show_help: bool,
     pub ascii_mode: bool,
+    pub chart_kind: ChartKind,
     /// Filtered+sorted process order, cached across frames. Rebuilt only by
     /// `refresh_process_order`, which every filter/sort/snapshot-changing path must call.
     pub process_order: ProcessOrder,
@@ -50,6 +51,7 @@ impl App {
             scroll_offset: 0,
             show_help: false,
             ascii_mode,
+            chart_kind: ChartKind::Memory,
             process_order: ProcessOrder::default(),
             sampler_cmd_tx,
             #[cfg(test)]
@@ -93,6 +95,8 @@ impl App {
             KeyCode::Char('3') => self.set_focus(PanelId::Disk),
             KeyCode::Char('4') => self.set_focus(PanelId::Network),
             KeyCode::Char('5') => self.set_focus(PanelId::Process),
+            KeyCode::Char('6') => self.set_focus(PanelId::Chart),
+            KeyCode::Char('g') => self.chart_kind = self.chart_kind.next(),
             KeyCode::Char('s') => {
                 let anchor = self.process_anchor_pid();
                 self.sort_mode = self.sort_mode.next();
@@ -176,7 +180,8 @@ impl App {
             PanelId::Memory => PanelId::Disk,
             PanelId::Disk => PanelId::Network,
             PanelId::Network => PanelId::Process,
-            PanelId::Process => PanelId::Cpu,
+            PanelId::Process => PanelId::Chart,
+            PanelId::Chart => PanelId::Cpu,
         };
         self.set_focus(next);
     }
@@ -278,6 +283,7 @@ mod tests {
             PanelId::Disk,
             PanelId::Network,
             PanelId::Process,
+            PanelId::Chart,
             PanelId::Cpu,
         ];
         for expected in order {
@@ -291,6 +297,42 @@ mod tests {
         let mut app = test_app();
         app.update(press(KeyCode::Char('3')));
         assert_eq!(app.focused_panel, PanelId::Disk);
+    }
+
+    #[test]
+    fn digit_6_focuses_chart_panel() {
+        let mut app = test_app();
+        app.update(press(KeyCode::Char('6')));
+        assert_eq!(app.focused_panel, PanelId::Chart);
+    }
+
+    #[test]
+    fn g_cycles_chart_kind() {
+        let mut app = test_app();
+        assert_eq!(app.chart_kind, ChartKind::Memory);
+        app.update(press(KeyCode::Char('g')));
+        assert_eq!(app.chart_kind, ChartKind::Disk);
+        app.update(press(KeyCode::Char('g')));
+        assert_eq!(app.chart_kind, ChartKind::Cpu);
+        app.update(press(KeyCode::Char('g')));
+        assert_eq!(app.chart_kind, ChartKind::Memory);
+    }
+
+    #[test]
+    fn g_is_captured_as_filter_text_while_filter_editing() {
+        let mut app = test_app();
+        app.update(press(KeyCode::Char('/')));
+        app.update(press(KeyCode::Char('g')));
+        assert_eq!(app.filter, "g");
+        assert_eq!(app.chart_kind, ChartKind::Memory);
+    }
+
+    #[test]
+    fn g_is_ignored_while_help_overlay_is_shown() {
+        let mut app = test_app();
+        app.update(press(KeyCode::Char('?')));
+        app.update(press(KeyCode::Char('g')));
+        assert_eq!(app.chart_kind, ChartKind::Memory);
     }
 
     #[test]

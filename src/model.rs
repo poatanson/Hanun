@@ -240,7 +240,7 @@ fn ascii_lowercased(s: &str) -> impl Iterator<Item = char> + '_ {
     s.chars().map(|c| c.to_ascii_lowercase())
 }
 
-/// The five monitored panels, in the order used by the 1-5 keybinding.
+/// The six monitored panels, in the order used by the 1-6 keybinding.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelId {
     Cpu,
@@ -248,6 +248,74 @@ pub enum PanelId {
     Disk,
     Network,
     Process,
+    Chart,
+}
+
+/// Which resource the CHART panel currently visualizes, cycled by the `g` key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChartKind {
+    Memory,
+    Disk,
+    Cpu,
+}
+
+impl ChartKind {
+    /// Returns the next kind in the cycle: Memory -> Disk -> Cpu -> Memory ...
+    pub fn next(self) -> Self {
+        match self {
+            ChartKind::Memory => ChartKind::Disk,
+            ChartKind::Disk => ChartKind::Cpu,
+            ChartKind::Cpu => ChartKind::Memory,
+        }
+    }
+
+    /// Short label shown in the chart panel title.
+    pub fn label(self) -> &'static str {
+        match self {
+            ChartKind::Memory => "MEMORY",
+            ChartKind::Disk => "DISK",
+            ChartKind::Cpu => "CPU",
+        }
+    }
+
+    /// Label for the primary (colored) slice of the donut.
+    pub fn primary_label(self) -> &'static str {
+        match self {
+            ChartKind::Memory => "USED",
+            ChartKind::Disk => "USED",
+            ChartKind::Cpu => "BUSY",
+        }
+    }
+
+    /// Label for the secondary (neutral) slice of the donut.
+    pub fn secondary_label(self) -> &'static str {
+        match self {
+            ChartKind::Memory => "FREE",
+            ChartKind::Disk => "FREE",
+            ChartKind::Cpu => "IDLE",
+        }
+    }
+}
+
+/// Percentage of `used` within `total`, clamped to 0-100. Returns 0.0 when `total` is 0
+/// (before the first sample, or on a system reporting no capacity for a resource).
+pub fn percent_of(used: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (used as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+    }
+}
+
+/// Sums used and total bytes across all disks. `DiskSnapshot` has no aggregate/used field
+/// of its own, so used is derived per-disk as `total_bytes - available_bytes`.
+pub fn aggregate_disk_usage(disks: &[DiskSnapshot]) -> (u64, u64) {
+    disks.iter().fold((0, 0), |(used, total), disk| {
+        (
+            used + disk.total_bytes.saturating_sub(disk.available_bytes),
+            total + disk.total_bytes,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -442,5 +510,45 @@ mod tests {
         let mut order = ProcessOrder::default();
         order.rebuild(&processes, "", SortMode::PidAsc);
         assert_eq!(order.position_of_pid(&processes, 999), None);
+    }
+
+    #[test]
+    fn chart_kind_cycles_through_all_variants() {
+        let start = ChartKind::Memory;
+        let after_three = start.next().next().next();
+        assert_eq!(after_three, start);
+    }
+
+    #[test]
+    fn percent_of_divides_used_by_total() {
+        assert_eq!(percent_of(50, 100), 50.0);
+        assert_eq!(percent_of(1, 4), 25.0);
+    }
+
+    #[test]
+    fn percent_of_is_zero_when_total_is_zero() {
+        assert_eq!(percent_of(5, 0), 0.0);
+    }
+
+    fn disk(total_bytes: u64, available_bytes: u64) -> DiskSnapshot {
+        DiskSnapshot {
+            name: "d".to_string(),
+            mount_point: "/".to_string(),
+            total_bytes,
+            available_bytes,
+            read_bytes_per_sec: 0,
+            write_bytes_per_sec: 0,
+        }
+    }
+
+    #[test]
+    fn aggregate_disk_usage_sums_across_disks() {
+        let disks = vec![disk(100, 60), disk(200, 50)];
+        assert_eq!(aggregate_disk_usage(&disks), (40 + 150, 300));
+    }
+
+    #[test]
+    fn aggregate_disk_usage_empty_slice_is_zero() {
+        assert_eq!(aggregate_disk_usage(&[]), (0, 0));
     }
 }

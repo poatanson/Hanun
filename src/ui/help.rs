@@ -6,12 +6,13 @@ use crate::ui::theme;
 
 const HELP_TEXT: &str = "\
 q / Esc      Quit
-Tab, 1-5     Focus panel
+Tab, 1-6     Focus panel
 \u{2191}\u{2193}, j k       Scroll focused list
 s            Cycle sort (CPU/Mem/PID/Name)
 /            Filter processes (Enter/Esc to close)
 p            Pause / resume sampling
 + / -        Adjust refresh interval (500-5000ms)
+g            Cycle chart (Mem/Disk/CPU)
 ?            Toggle this help";
 
 /// Draws a centered help overlay listing all keybindings.

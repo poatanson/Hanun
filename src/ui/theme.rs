@@ -1,6 +1,8 @@
 use ratatui::style::{Color, Style};
 use ratatui::symbols::border;
 
+use crate::model::ChartKind;
+
 /// Usage percentage at or above this is rendered in the warning color.
 pub const WARN_THRESHOLD: f32 = 70.0;
 /// Usage percentage at or above this is rendered in the critical color.
@@ -55,6 +57,19 @@ pub fn arrows(ascii_mode: bool) -> (&'static str, &'static str) {
     }
 }
 
+/// (primary, secondary) slice colors for the CHART panel's donut, per `ChartKind`. The
+/// secondary ("free"/"idle") slice always uses a neutral gray so the accent color alone
+/// identifies which resource is shown. All colors are basic ANSI-safe named colors (no RGB
+/// truecolor) for Windows console (cmd.exe / Windows Terminal) compatibility.
+pub fn chart_slice_colors(kind: ChartKind) -> (Color, Color) {
+    let primary = match kind {
+        ChartKind::Memory => Color::Cyan,
+        ChartKind::Disk => Color::Magenta,
+        ChartKind::Cpu => Color::Blue,
+    };
+    (primary, Color::DarkGray)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +93,19 @@ mod tests {
     fn usage_at_crit_threshold_is_red() {
         assert_eq!(style_for_usage(CRIT_THRESHOLD).fg, Some(Color::Red));
         assert_eq!(style_for_usage(100.0).fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn chart_slice_colors_have_distinct_primary_per_kind() {
+        let (mem_primary, mem_secondary) = chart_slice_colors(ChartKind::Memory);
+        let (disk_primary, disk_secondary) = chart_slice_colors(ChartKind::Disk);
+        let (cpu_primary, cpu_secondary) = chart_slice_colors(ChartKind::Cpu);
+
+        assert_ne!(mem_primary, disk_primary);
+        assert_ne!(disk_primary, cpu_primary);
+        assert_ne!(mem_primary, cpu_primary);
+        assert_eq!(mem_secondary, Color::DarkGray);
+        assert_eq!(disk_secondary, Color::DarkGray);
+        assert_eq!(cpu_secondary, Color::DarkGray);
     }
 }

@@ -144,12 +144,13 @@ fn print_help() {
     println!();
     println!("KEYS (inside hanun):");
     println!("    q / Esc        Quit");
-    println!("    Tab, 1-5       Focus panel");
+    println!("    Tab, 1-6       Focus panel");
     println!("    Up/Down, j k   Scroll focused list");
     println!("    s              Cycle sort");
     println!("    /              Filter processes");
     println!("    p              Pause / resume");
     println!("    +/-            Adjust refresh interval");
+    println!("    g              Cycle chart (Mem/Disk/CPU)");
     println!("    ?              Help overlay");
 }
 
