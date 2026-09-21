@@ -1,2 +1,10 @@
 /target
 *.log
+.env
+.env.*
+!.env.example
+.claude/settings.json
+.claude/settings.local.json
+.claude/projects/
+claude.md
+.claude/
