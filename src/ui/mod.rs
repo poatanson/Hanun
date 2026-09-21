@@ -160,8 +160,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         frame,
         process_inner,
         snapshot.map(|s| s.processes.as_slice()),
-        app.sort_mode,
-        &app.filter,
+        app.process_order.indices(),
         offset(PanelId::Process),
     );
 }

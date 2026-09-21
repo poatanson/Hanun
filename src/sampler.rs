@@ -8,8 +8,8 @@ use sysinfo::{
 
 use crate::event::AppEvent;
 use crate::model::{
-    CpuSnapshot, DiskSnapshot, MemSnapshot, NetInterfaceSnapshot, NetSnapshot, ProcessSnapshot,
-    Snapshot,
+    self, CpuSnapshot, DiskSnapshot, MemSnapshot, NetInterfaceSnapshot, NetSnapshot,
+    ProcessSnapshot, Snapshot,
 };
 
 /// Commands sent from the UI thread to control the sampler.
@@ -136,67 +136,54 @@ fn build_mem_snapshot(system: &System) -> MemSnapshot {
     }
 }
 
-/// Builds one `DiskSnapshot` per volume, converting sysinfo's "since last refresh" byte
-/// counts into a rate using the wall-clock time between ticks. On the first sample sysinfo
-/// has no prior reading to diff against and reports the disk's entire lifetime byte count as
-/// the delta, so rates are forced to 0 rather than showing that nonsensical spike.
+/// Builds one `DiskSnapshot` per volume. Byte counts come straight from sysinfo; the
+/// rate conversion itself is `model::bytes_per_sec` (normalization/rate math lives in
+/// `model`, not here -- this function only collects the raw inputs it needs).
 fn build_disk_snapshots(disks: &Disks, elapsed_secs: f64, first_sample: bool) -> Vec<DiskSnapshot> {
     disks
         .list()
         .iter()
         .map(|disk| {
             let usage = disk.usage();
-            let (read_bytes_per_sec, write_bytes_per_sec) = if first_sample {
-                (0, 0)
-            } else {
-                (
-                    (usage.read_bytes as f64 / elapsed_secs) as u64,
-                    (usage.written_bytes as f64 / elapsed_secs) as u64,
-                )
-            };
             DiskSnapshot {
                 name: disk.name().to_string_lossy().into_owned(),
                 mount_point: disk.mount_point().to_string_lossy().into_owned(),
                 total_bytes: disk.total_space(),
                 available_bytes: disk.available_space(),
-                read_bytes_per_sec,
-                write_bytes_per_sec,
+                read_bytes_per_sec: model::bytes_per_sec(
+                    usage.read_bytes,
+                    elapsed_secs,
+                    first_sample,
+                ),
+                write_bytes_per_sec: model::bytes_per_sec(
+                    usage.written_bytes,
+                    elapsed_secs,
+                    first_sample,
+                ),
             }
         })
         .collect()
 }
 
-/// Builds a `NetSnapshot` from the current interface list, converting sysinfo's "since last
-/// refresh" byte counts into a rate using the wall-clock time between ticks. Rates are forced
-/// to 0 on the first sample for the same reason as `build_disk_snapshots`.
+/// Builds a `NetSnapshot` from the current interface list. See `build_disk_snapshots` --
+/// the rate conversion is `model::bytes_per_sec`, not inlined here.
 fn build_net_snapshot(networks: &Networks, elapsed_secs: f64, first_sample: bool) -> NetSnapshot {
     let interfaces = networks
         .list()
         .iter()
-        .map(|(name, data)| {
-            let (rx_bytes_per_sec, tx_bytes_per_sec) = if first_sample {
-                (0, 0)
-            } else {
-                (
-                    (data.received() as f64 / elapsed_secs) as u64,
-                    (data.transmitted() as f64 / elapsed_secs) as u64,
-                )
-            };
-            NetInterfaceSnapshot {
-                name: name.clone(),
-                rx_bytes_per_sec,
-                tx_bytes_per_sec,
-            }
+        .map(|(name, data)| NetInterfaceSnapshot {
+            name: name.clone(),
+            rx_bytes_per_sec: model::bytes_per_sec(data.received(), elapsed_secs, first_sample),
+            tx_bytes_per_sec: model::bytes_per_sec(data.transmitted(), elapsed_secs, first_sample),
         })
         .collect();
     NetSnapshot { interfaces }
 }
 
-/// Builds one `ProcessSnapshot` per running process. `cpu_percent_normalized` divides
-/// sysinfo's raw value (which can reach `100 * core_count`) by the core count so it never
-/// exceeds 100.
+/// Builds one `ProcessSnapshot` per running process. `cpu_percent_normalized` is computed
+/// by `model::normalize_process_cpu`, not inlined here (see `build_disk_snapshots`).
 fn build_process_snapshots(system: &System) -> Vec<ProcessSnapshot> {
-    let core_count = (system.cpus().len().max(1)) as f32;
+    let core_count = system.cpus().len();
     system
         .processes()
         .values()
@@ -206,7 +193,7 @@ fn build_process_snapshots(system: &System) -> Vec<ProcessSnapshot> {
                 pid: process.pid().as_u32(),
                 name: process.name().to_string_lossy().into_owned(),
                 cpu_percent_raw,
-                cpu_percent_normalized: (cpu_percent_raw / core_count).clamp(0.0, 100.0),
+                cpu_percent_normalized: model::normalize_process_cpu(cpu_percent_raw, core_count),
                 mem_bytes: process.memory(),
                 status: process.status().to_string(),
             }

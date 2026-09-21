@@ -35,17 +35,37 @@ fn init_tracing() -> WorkerGuard {
     guard
 }
 
+/// Enables raw mode and switches to the alternate screen, returning the `Terminal`. Each
+/// step that succeeds is rolled back immediately if a later one fails, so this function
+/// never returns an error while leaving raw mode or the alternate screen enabled with
+/// nothing left to restore them.
 fn init_terminal() -> Result<Tui> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    Ok(terminal)
+
+    if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
+        tracing::error!(%err, "entering alternate screen failed, reverting raw mode");
+        let _ = disable_raw_mode();
+        return Err(err.into());
+    }
+
+    match Terminal::new(CrosstermBackend::new(io::stdout())) {
+        Ok(terminal) => Ok(terminal),
+        Err(err) => {
+            tracing::error!(%err, "terminal construction failed, reverting terminal setup");
+            let _ = restore_terminal();
+            Err(err.into())
+        }
+    }
 }
 
-/// Restore raw mode and the primary screen; safe to call more than once.
+/// Restores raw mode and the primary screen. Safe to call more than once, and safe to
+/// call when only part of `init_terminal()` succeeded: both steps are always attempted
+/// independently, so one failing does not stop the other from being tried.
 fn restore_terminal() -> Result<()> {
-    disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    let raw_mode_result = disable_raw_mode();
+    let alt_screen_result = execute!(io::stdout(), LeaveAlternateScreen);
+    raw_mode_result?;
+    alt_screen_result?;
     Ok(())
 }
 

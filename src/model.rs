@@ -67,6 +67,23 @@ pub struct ProcessSnapshot {
     pub status: String,
 }
 
+/// Normalizes a process's raw CPU usage (sysinfo reports up to `100 * core_count` on
+/// multi-core machines) to a 0-100 range by dividing by the core count.
+pub fn normalize_process_cpu(raw_percent: f32, core_count: usize) -> f32 {
+    (raw_percent / core_count.max(1) as f32).clamp(0.0, 100.0)
+}
+
+/// Converts a byte delta since the last sample into a bytes/sec rate. Forced to 0 on the
+/// first sample, since sysinfo has no prior reading to diff against yet and would
+/// otherwise report the resource's entire lifetime total as if it happened in one tick.
+pub fn bytes_per_sec(delta_bytes: u64, elapsed_secs: f64, first_sample: bool) -> u64 {
+    if first_sample {
+        0
+    } else {
+        (delta_bytes as f64 / elapsed_secs) as u64
+    }
+}
+
 /// Fixed-capacity ring buffer backing the sparkline/history views. Wired up once the
 /// interactivity step adds sparklines to the CPU/memory/network panels.
 #[allow(dead_code)]
@@ -140,6 +157,89 @@ impl SortMode {
     }
 }
 
+/// Filtered + sorted view over a snapshot's process list, expressed as indices into
+/// `Snapshot::processes`. The caller (`App`) rebuilds it only when the snapshot, sort
+/// mode, or filter text actually changes -- never on a bare tick -- so the render path
+/// only ever slices an already-ordered list instead of re-filtering/re-sorting every
+/// frame.
+#[derive(Default)]
+pub struct ProcessOrder {
+    indices: Vec<usize>,
+}
+
+impl ProcessOrder {
+    /// Recomputes the filtered, sorted index list in place, reusing the existing
+    /// allocation rather than allocating a fresh `Vec` on every rebuild. Filtering and
+    /// name sorting compare case-insensitively without allocating a lowercase copy per
+    /// process (see `contains_ascii_case_insensitive`).
+    pub fn rebuild(&mut self, processes: &[ProcessSnapshot], filter: &str, sort_mode: SortMode) {
+        self.indices.clear();
+        self.indices.extend(
+            processes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| contains_ascii_case_insensitive(&p.name, filter).then_some(i)),
+        );
+        self.sort(processes, sort_mode);
+    }
+
+    fn sort(&mut self, processes: &[ProcessSnapshot], sort_mode: SortMode) {
+        match sort_mode {
+            SortMode::CpuDesc => self.indices.sort_by(|&a, &b| {
+                processes[b]
+                    .cpu_percent_normalized
+                    .total_cmp(&processes[a].cpu_percent_normalized)
+            }),
+            SortMode::MemDesc => self
+                .indices
+                .sort_by_key(|&i| std::cmp::Reverse(processes[i].mem_bytes)),
+            SortMode::PidAsc => self.indices.sort_by_key(|&i| processes[i].pid),
+            SortMode::NameAsc => self.indices.sort_by(|&a, &b| {
+                ascii_lowercased(&processes[a].name).cmp(ascii_lowercased(&processes[b].name))
+            }),
+        }
+    }
+
+    /// Indices into the snapshot's process list, in filtered+sorted display order.
+    pub fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    /// Number of processes currently matching the filter.
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Finds `pid`'s current position in the order. Used to keep the scroll anchor on the
+    /// same process across a resort/refilter/new snapshot instead of snapping to whatever
+    /// now sits at the same index.
+    pub fn position_of_pid(&self, processes: &[ProcessSnapshot], pid: u32) -> Option<usize> {
+        self.indices.iter().position(|&i| processes[i].pid == pid)
+    }
+}
+
+/// ASCII case-insensitive substring test with no allocation. An empty `needle` matches
+/// everything. Process/executable names on Windows are effectively always ASCII, so this
+/// trades full Unicode case folding -- which would need a new heap-allocated lowercase
+/// copy of every process name on every filter keystroke -- for a zero-allocation scan.
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// ASCII-lowercased characters of `s`, compared lazily so `NameAsc` sorting never
+/// allocates a lowercase copy of any process name.
+fn ascii_lowercased(s: &str) -> impl Iterator<Item = char> + '_ {
+    s.chars().map(|c| c.to_ascii_lowercase())
+}
+
 /// The five monitored panels, in the order used by the 1-5 keybinding.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelId {
@@ -176,5 +276,171 @@ mod tests {
         let start = SortMode::CpuDesc;
         let after_four = start.next().next().next().next();
         assert_eq!(after_four, start);
+    }
+
+    #[test]
+    fn normalize_process_cpu_divides_by_core_count() {
+        assert_eq!(normalize_process_cpu(50.0, 1), 50.0);
+        assert_eq!(normalize_process_cpu(400.0, 4), 100.0);
+    }
+
+    #[test]
+    fn normalize_process_cpu_clamps_to_0_100() {
+        assert_eq!(normalize_process_cpu(800.0, 4), 100.0); // would be 200 unclamped
+        assert_eq!(normalize_process_cpu(-10.0, 4), 0.0);
+    }
+
+    #[test]
+    fn normalize_process_cpu_treats_zero_cores_as_one() {
+        assert_eq!(normalize_process_cpu(50.0, 0), 50.0);
+    }
+
+    #[test]
+    fn bytes_per_sec_divides_delta_by_elapsed_time() {
+        assert_eq!(bytes_per_sec(1000, 2.0, false), 500);
+        assert_eq!(bytes_per_sec(0, 1.0, false), 0);
+    }
+
+    #[test]
+    fn bytes_per_sec_is_zero_on_first_sample() {
+        assert_eq!(bytes_per_sec(1_000_000, 1.0, true), 0);
+    }
+
+    #[test]
+    fn contains_ascii_case_insensitive_matches_regardless_of_case() {
+        assert!(contains_ascii_case_insensitive("Chrome.exe", "chrome"));
+        assert!(contains_ascii_case_insensitive("Chrome.exe", "CHROME"));
+        assert!(contains_ascii_case_insensitive("Chrome.exe", ".exe"));
+    }
+
+    #[test]
+    fn contains_ascii_case_insensitive_empty_needle_matches_everything() {
+        assert!(contains_ascii_case_insensitive("anything.exe", ""));
+        assert!(contains_ascii_case_insensitive("", ""));
+    }
+
+    #[test]
+    fn contains_ascii_case_insensitive_rejects_non_match() {
+        assert!(!contains_ascii_case_insensitive("Chrome.exe", "firefox"));
+        assert!(!contains_ascii_case_insensitive("short", "way too long"));
+    }
+
+    fn proc(pid: u32, name: &str, cpu: f32, mem_mib: u64) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.to_string(),
+            cpu_percent_raw: cpu,
+            cpu_percent_normalized: cpu,
+            mem_bytes: mem_mib * 1024 * 1024,
+            status: "Running".to_string(),
+        }
+    }
+
+    fn sample_processes() -> Vec<ProcessSnapshot> {
+        vec![
+            proc(30, "chrome.exe", 12.0, 500),
+            proc(10, "explorer.exe", 3.0, 100),
+            proc(20, "Notepad.exe", 45.0, 20),
+        ]
+    }
+
+    fn names_in_order(order: &ProcessOrder, processes: &[ProcessSnapshot]) -> Vec<&'static str> {
+        order
+            .indices()
+            .iter()
+            .map(|&i| match processes[i].pid {
+                30 => "chrome.exe",
+                10 => "explorer.exe",
+                20 => "Notepad.exe",
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn process_order_sorts_by_cpu_desc() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::CpuDesc);
+        assert_eq!(
+            names_in_order(&order, &processes),
+            vec!["Notepad.exe", "chrome.exe", "explorer.exe"]
+        );
+    }
+
+    #[test]
+    fn process_order_sorts_by_mem_desc() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::MemDesc);
+        assert_eq!(
+            names_in_order(&order, &processes),
+            vec!["chrome.exe", "explorer.exe", "Notepad.exe"]
+        );
+    }
+
+    #[test]
+    fn process_order_sorts_by_pid_asc() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::PidAsc);
+        assert_eq!(
+            names_in_order(&order, &processes),
+            vec!["explorer.exe", "Notepad.exe", "chrome.exe"]
+        );
+    }
+
+    #[test]
+    fn process_order_sorts_by_name_asc_case_insensitive() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::NameAsc);
+        assert_eq!(
+            names_in_order(&order, &processes),
+            vec!["chrome.exe", "explorer.exe", "Notepad.exe"]
+        );
+    }
+
+    #[test]
+    fn process_order_filters_by_name_substring_case_insensitive() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "NOTE", SortMode::CpuDesc);
+        assert_eq!(names_in_order(&order, &processes), vec!["Notepad.exe"]);
+    }
+
+    #[test]
+    fn process_order_empty_filter_matches_everything() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::PidAsc);
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn process_order_no_match_is_empty() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "zzz", SortMode::CpuDesc);
+        assert_eq!(order.len(), 0);
+    }
+
+    #[test]
+    fn position_of_pid_finds_process_after_resort() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::PidAsc);
+        assert_eq!(order.position_of_pid(&processes, 20), Some(1));
+
+        order.rebuild(&processes, "", SortMode::CpuDesc);
+        assert_eq!(order.position_of_pid(&processes, 20), Some(0));
+    }
+
+    #[test]
+    fn position_of_pid_returns_none_when_process_is_gone() {
+        let processes = sample_processes();
+        let mut order = ProcessOrder::default();
+        order.rebuild(&processes, "", SortMode::PidAsc);
+        assert_eq!(order.position_of_pid(&processes, 999), None);
     }
 }
